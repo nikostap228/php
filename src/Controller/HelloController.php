@@ -12,7 +12,7 @@ use Symfony\Component\Routing\Attribute\Route;
 
 class HelloController extends AbstractController
 {
-    public function __construct(private readonly HelloService $helloService)
+    public function __construct(private readonly HelloService $helloService,)
     {
 
     }
