@@ -9,11 +9,9 @@ use Symfony\Component\Routing\Annotation\Route;
 
 class GCDController extends AbstractController
 {
-    private GCDCalculator $gcdCalculator;
 
-    public function __construct(GCDCalculator $gcdCalculator)
+    public function __construct(private readonly GCDCalculator $gcdCalculator)
     {
-        $this->gcdCalculator = $gcdCalculator;
     }
 
     #[Route('/gcd/{number1}/{number2}', name: 'gcd_calculate', methods: ['GET'])]

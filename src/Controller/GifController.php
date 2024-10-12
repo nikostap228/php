@@ -8,10 +8,20 @@ use Symfony\Component\Routing\Annotation\Route;
 
 class GifController extends AbstractController
 {
-
-    #[Route('/gif')]
-    public function index(): Response
+    #[Route('/cat')]
+    public function cat(): Response
     {
-        return $this->render('./index.html.twig');
+        return $this->render('./cat.html.twig');
+    }
+    #[Route('/dog')]
+    public function dog(): Response
+    {
+        return $this->render('./dog.html.twig');
+    }
+
+    #[Route('/artur')]
+    public function artur(): Response
+    {
+        return $this->render('./artur.html.twig');
     }
 }
