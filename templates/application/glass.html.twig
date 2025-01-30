@@ -1,0 +1,41 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Stock Glass{% endblock %}
+
+{% block body %}
+    <div class="container mt-5">
+        <h1>Stock Glass</h1>
+        <table class="table">
+            <thead>
+            <tr>
+                <th>Portfolio ID</th>
+                <th>Stock</th>
+                <th>Quantity</th>
+                <th>Cost</th>
+                <th>Action</th>
+                <th>Operations</th> {# Новая колонка для кнопок удаления и редактирования #}
+            </tr>
+            </thead>
+            <tbody>
+            {% for application in applications %}
+                <tr>
+                    <td>{{ application.portfolio.id }}</td>
+                    <td>{{ application.stock.name }}</td>
+                    <td>{{ application.quantity }}</td>
+                    <td>{{ application.cost }}</td>
+                    <td>{{ application.action }}</td>
+                    <td>
+                        {% if application.portfolio.user == app.user %}
+                            <form action="{{ path('app_application_delete', {'id': application.id}) }}" method="post" style="display:inline;">
+                                <input type="hidden" name="_token" value="{{ csrf_token('delete' ~ application.id) }}">
+                                <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure?');">Delete</button>
+                            </form>
+                            <a href="{{ path('app_application_update', {'id': application.id}) }}" class="btn btn-primary btn-sm">Edit</a>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% endblock %}

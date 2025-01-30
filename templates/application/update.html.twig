@@ -1,0 +1,23 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Update Application{% endblock %}
+
+{% block body %}
+    <div class="container mt-5">
+        <h1>Update Application</h1>
+        {{ form_start(form) }}
+
+        {# Render form fields #}
+        {{ form_row(form.portfolio) }}
+        {{ form_row(form.stock) }}
+        {{ form_row(form.quantity) }}
+        {{ form_row(form.cost) }}
+
+        {# The action field is not rendered #}
+        {# If you choose to exclude the action field, ensure it's excluded in the form builder as shown earlier. #}
+
+        <button type="submit" class="btn btn-primary">Update</button>
+
+        {{ form_end(form) }}
+    </div>
+{% endblock %}
