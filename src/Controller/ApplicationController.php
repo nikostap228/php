@@ -7,6 +7,7 @@ use App\Entity\Depositary;
 use App\Entity\PortfolioStock;
 use App\Form\ApplicationType;
 use App\Repository\ApplicationRepository;
+use App\Service\DealService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\Form\FormError;
@@ -29,7 +30,7 @@ class ApplicationController extends AbstractController
 
     // CREATE: Создание новой заявки
     #[Route('/application/create', name: 'app_application_create', methods: ['GET', 'POST'])]
-    public function create(Request $request, EntityManagerInterface $entityManager): Response
+    public function create(Request $request, EntityManagerInterface $entityManager, DealService $dealService): Response
     {
         $application = new Application();
         $form = $this->createForm(ApplicationType::class, $application, [
@@ -82,6 +83,14 @@ class ApplicationController extends AbstractController
                 $entityManager->persist($depositary);
             }
 
+            // Проверяем наличие подходящей заявки
+            $matchingApplication = $dealService->findMatchingApplication($application);
+            if ($matchingApplication) {
+                $dealService->executeTrade($application, $matchingApplication);
+                $this->addFlash('success', 'Trade executed successfully.');
+                return $this->redirectToRoute('app_glass', ['stock_id' => $stock->getId()]);
+            }
+
             // Persist the application
             $entityManager->persist($application);
             $entityManager->flush();
@@ -97,7 +106,7 @@ class ApplicationController extends AbstractController
 
     // UPDATE: Обновление заявки
     #[Route('/application/update/{id}', name: 'app_application_update', methods: ['GET', 'PUT', 'POST'])]
-    public function update(int $id, Request $request, EntityManagerInterface $entityManager, ApplicationRepository $applicationRepository): Response
+    public function update(int $id, Request $request, EntityManagerInterface $entityManager, ApplicationRepository $applicationRepository, DealService $dealService): Response
     {
         $application = $applicationRepository->find($id);
         if (!$application) {
@@ -190,6 +199,14 @@ class ApplicationController extends AbstractController
                     $portfolioStock->setFrozen($portfolioStock->getFrozen() + $difference);
                     $entityManager->persist($portfolioStock);
                 }
+            }
+
+            // Проверяем наличие подходящей заявки
+            $matchingApplication = $dealService->findMatchingApplication($application);
+            if ($matchingApplication) {
+                $dealService->executeTrade($application, $matchingApplication);
+                $this->addFlash('success', 'Trade executed successfully.');
+                return $this->redirectToRoute('app_glass', ['stock_id' => $application->getStock()->getId()]);
             }
 
             $entityManager->flush();

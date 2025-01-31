@@ -5,6 +5,7 @@ namespace App\Entity;
 use App\Repository\PortfolioRepository;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\Common\Collections\Collection;
+use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping as ORM;
 
 #[ORM\Entity(repositoryClass: PortfolioRepository::class)]
@@ -28,10 +29,10 @@ class Portfolio
     #[ORM\Column]
     private float $frozenCash = 0;
 
-    #[ORM\OneToMany(targetEntity: Depositary::class, mappedBy: 'portfolio')]
+    #[ORM\OneToMany(targetEntity: Depositary::class, mappedBy: 'portfolio', cascade: ['persist', 'remove'])]
     private Collection $depositaries;
 
-    #[ORM\OneToMany(targetEntity: PortfolioStock::class, mappedBy: 'portfolio')]
+    #[ORM\OneToMany(targetEntity: PortfolioStock::class, mappedBy: 'portfolio', cascade: ['persist', 'remove'])]
     private Collection $portfolioStocks;
 
     public function __construct()
@@ -107,21 +108,16 @@ class Portfolio
     }
 
     /**
-     * Получить доступные акции для конкретного тикера
+     * Добавить средства в баланс
      */
-    public function getAvailableStocksForTicker(string $ticker): int
+    public function addCash(float $amount): self
     {
-        $total = 0;
-        foreach ($this->portfolioStocks as $portfolioStock) {
-            if ($portfolioStock->getStock()->getTicker() === $ticker) {
-                $total += $portfolioStock->getAvailableQuantity();
-            }
-        }
-        return $total;
+        $this->balance += $amount;
+        return $this;
     }
 
     /**
-     * Deduct cash from the portfolio's balance
+     * Уменьшить средства из баланса
      */
     public function deductCash(float $amount): self
     {
@@ -131,7 +127,7 @@ class Portfolio
     }
 
     /**
-     * Revert cash deduction
+     * Ревертировать списание средств
      */
     public function revertCashDeduction(float $amount): self
     {
@@ -141,58 +137,60 @@ class Portfolio
     }
 
     /**
-     * Deduct stocks from the portfolio
+     * Добавить акции в портфель
      */
-    public function deductStocks(string $ticker, int $quantity): self
+    public function addStock(EntityManagerInterface $entityManager, Stock $stock, int $quantity): void
     {
-        foreach ($this->portfolioStocks as $portfolioStock) {
-            if ($portfolioStock->getStock()->getTicker() === $ticker) {
-                $portfolioStock->setQuantity($portfolioStock->getQuantity() - $quantity);
-                $portfolioStock->setFrozen($portfolioStock->getFrozen() + $quantity);
-                break;
-            }
+        $depositary = $entityManager->getRepository(Depositary::class)->findOneBy([
+            'portfolio' => $this,
+            'stock' => $stock,
+        ]);
+        if (!$depositary) {
+            $depositary = new Depositary();
+            $depositary->setPortfolio($this);
+            $depositary->setStock($stock);
+            $depositary->setQuantity(0);
         }
-        return $this;
+        $depositary->setQuantity($depositary->getQuantity() + $quantity);
+        $entityManager->persist($depositary);
+
+        // Обновляем PortfolioStock
+        $portfolioStock = $entityManager->getRepository(PortfolioStock::class)->findOneBy([
+            'portfolio' => $this,
+            'stock' => $stock,
+        ]);
+        if (!$portfolioStock) {
+            $portfolioStock = new PortfolioStock();
+            $portfolioStock->setPortfolio($this);
+            $portfolioStock->setStock($stock);
+            $portfolioStock->setQuantity(0);
+        }
+        $portfolioStock->setQuantity($portfolioStock->getQuantity() + $quantity);
+        $entityManager->persist($portfolioStock);
     }
 
     /**
-     * Revert stock deduction
+     * Удалить акции из портфеля
      */
-    public function revertStockDeduction(string $ticker, int $quantity): self
+    public function removeStock(EntityManagerInterface $entityManager, Stock $stock, int $quantity): void
     {
-        foreach ($this->portfolioStocks as $portfolioStock) {
-            if ($portfolioStock->getStock()->getTicker() === $ticker) {
-                $portfolioStock->setQuantity($portfolioStock->getQuantity() + $quantity);
-                $portfolioStock->setFrozen($portfolioStock->getFrozen() - $quantity);
-                break;
-            }
+        $depositary = $entityManager->getRepository(Depositary::class)->findOneBy([
+            'portfolio' => $this,
+            'stock' => $stock,
+        ]);
+        if ($depositary) {
+            $depositary->setQuantity($depositary->getQuantity() - $quantity);
+            $entityManager->persist($depositary);
         }
-        return $this;
-    }
 
-    /**
-     * Получить сток по тикеру
-     */
-    public function getStockByTicker(string $ticker): ?Stock
-    {
-        foreach ($this->portfolioStocks as $portfolioStock) {
-            if ($portfolioStock->getStock()->getTicker() === $ticker) {
-                return $portfolioStock->getStock();
-            }
+        // Обновляем PortfolioStock
+        $portfolioStock = $entityManager->getRepository(PortfolioStock::class)->findOneBy([
+            'portfolio' => $this,
+            'stock' => $stock,
+        ]);
+        if ($portfolioStock) {
+            $portfolioStock->setQuantity($portfolioStock->getQuantity() - $quantity);
+            $entityManager->persist($portfolioStock);
         }
-        return null;
-    }
-
-    /**
-     * Получить PortfolioStock по стоку
-     */
-    public function getPortfolioStock(Stock $stock): ?PortfolioStock
-    {
-        foreach ($this->portfolioStocks as $portfolioStock) {
-            if ($portfolioStock->getStock() === $stock) {
-                return $portfolioStock;
-            }
-        }
-        return null;
     }
 }
