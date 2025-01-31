@@ -24,9 +24,14 @@ class Depositary
     #[ORM\Column]
     private ?int $quantity = null;
 
+    #[ORM\Column]
+    private ?int $frozen = 0;
+
     public function __construct()
     {
         $this->quantity = 0;
+        $this->frozen = 0; // Инициализируем frozen
+
     }
 
     public function getId(): ?int
@@ -69,4 +74,21 @@ class Depositary
 
         return $this;
     }
+
+    public function getFrozen(): ?int
+    {
+        return $this->frozen;
+    }
+
+    public function setFrozen(int $frozen): static
+    {
+        $this->frozen = $frozen;
+        return $this;
+    }
+
+    public function getAvailableQuantity(): int
+    {
+        return $this->quantity - $this->frozen;
+    }
+
 }

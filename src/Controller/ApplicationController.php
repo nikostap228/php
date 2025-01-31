@@ -8,11 +8,13 @@ use App\Entity\PortfolioStock;
 use App\Form\ApplicationType;
 use App\Repository\ApplicationRepository;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\Exception\ORMException;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\Form\FormError;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Annotation\Route;
+use Doctrine\ORM\OptimisticLockException;
 
 class ApplicationController extends AbstractController
 {
@@ -52,37 +54,38 @@ class ApplicationController extends AbstractController
             }
 
             if ($action === 'buy') {
+                // Логика для покупки
                 $requiredCash = $quantity * $cost;
                 $availableCash = $portfolio->getAvailableCash();
-
-                $this->addFlash('debug', 'Available cash: ' . $availableCash);
-                $this->addFlash('debug', 'Required cash: ' . $requiredCash);
 
                 if ($availableCash < $requiredCash) {
                     $form->get('quantity')->addError(new FormError('Not enough available cash.'));
                     return $this->render('application/create.html.twig', ['form' => $form->createView()]);
                 }
 
+                // Замораживаем средства
                 $portfolio->deductCash($requiredCash);
             } else { // Action is 'sell'
                 // Получаем Depositary для данного портфеля и акции
                 $depositary = $entityManager->getRepository(Depositary::class)
                     ->findOneBy(['portfolio' => $portfolio, 'stock' => $stock]);
 
-                if (!$depositary || $depositary->getQuantity() < $quantity) {
+                // Проверяем доступное количество акций (quantity - frozen)
+                if (!$depositary || $depositary->getAvailableQuantity() < $quantity) {
                     $form->get('quantity')->addError(new FormError('Not enough available stocks.'));
                     return $this->render('application/create.html.twig', ['form' => $form->createView()]);
                 }
 
-                $this->addFlash('debug', 'Available stocks: ' . $depositary->getQuantity());
-                $this->addFlash('debug', 'Required stocks: ' . $quantity);
+                // Замораживаем акции
+                $depositary->setFrozen($depositary->getFrozen() + $quantity);
 
-                // Обновляем количество акций в Depositary
+                // Уменьшаем количество акций в портфеле
                 $depositary->setQuantity($depositary->getQuantity() - $quantity);
+
                 $entityManager->persist($depositary);
             }
 
-            // Persist the application
+            // Сохраняем заявку
             $entityManager->persist($application);
             $entityManager->flush();
 
@@ -95,7 +98,6 @@ class ApplicationController extends AbstractController
         ]);
     }
 
-    // UPDATE: Обновление заявки
     #[Route('/application/update/{id}', name: 'app_application_update', methods: ['GET', 'PUT', 'POST'])]
     public function update(int $id, Request $request, EntityManagerInterface $entityManager, ApplicationRepository $applicationRepository): Response
     {
@@ -136,11 +138,12 @@ class ApplicationController extends AbstractController
             $stock = $application->getStock();
 
             if ($originalAction === 'buy') {
+                // Логика для обновления покупки
                 $originalRequiredCash = $originalQuantity * $originalCost;
                 $newRequiredCash = $newQuantity * $newCost;
                 $difference = $newRequiredCash - $originalRequiredCash;
 
-                $availableCash = $portfolio->getAvailableCash() + $originalRequiredCash; // Revert original frozen cash
+                $availableCash = $portfolio->getAvailableCash() + $originalRequiredCash; // Возвращаем оригинальные замороженные средства
 
                 if ($difference > $availableCash) {
                     $form->get('quantity')->addError(new FormError('Not enough available cash.'));
@@ -149,10 +152,9 @@ class ApplicationController extends AbstractController
                     ]);
                 }
 
-                // Deduct the new required cash
+                // Замораживаем новые средства
                 $portfolio->deductCash($difference);
             } else { // Action is 'sell'
-                // Получаем Depositary для данного портфеля и акции
                 $depositary = $entityManager->getRepository(Depositary::class)
                     ->findOneBy(['portfolio' => $portfolio, 'stock' => $stock]);
 
@@ -163,39 +165,34 @@ class ApplicationController extends AbstractController
                     ]);
                 }
 
-                $originalFrozen = $originalQuantity;
-                $newFrozen = $newQuantity;
-                $difference = $newFrozen - $originalFrozen;
+                // Возвращаем оригинальные замороженные акции
+                $depositary->setFrozen($depositary->getFrozen() - $originalQuantity);
 
-                $availableStocks = $depositary->getQuantity() + $originalFrozen; // Revert original frozen stocks
+                // Увеличиваем количество акций в портфеле
+                $depositary->setQuantity($depositary->getQuantity() + $originalQuantity);
 
-                if ($difference > $availableStocks) {
+                // Проверяем доступное количество акций
+                $availableStocks = $depositary->getAvailableQuantity();
+
+                if ($newQuantity > $availableStocks) {
                     $form->get('quantity')->addError(new FormError('Not enough available stocks.'));
                     return $this->render('application/update.html.twig', [
                         'form' => $form->createView(),
                     ]);
                 }
 
-                // Обновляем количество акций в Depositary
-                $depositary->setQuantity($depositary->getQuantity() - $difference);
+                // Замораживаем новое количество акций
+                $depositary->setFrozen($depositary->getFrozen() + $newQuantity);
+
+                // Уменьшаем количество акций в портфеле
+                $depositary->setQuantity($depositary->getQuantity() - $newQuantity);
+
                 $entityManager->persist($depositary);
-
-                // Обновляем PortfolioStock
-                $portfolioStock = $entityManager->getRepository(PortfolioStock::class)->findOneBy([
-                    'portfolio' => $portfolio,
-                    'stock' => $stock,
-                ]);
-
-                if ($portfolioStock) {
-                    $portfolioStock->setFrozen($portfolioStock->getFrozen() + $difference);
-                    $entityManager->persist($portfolioStock);
-                }
             }
 
             $entityManager->flush();
 
             $this->addFlash('success', 'Application updated successfully.');
-
             return $this->redirectToRoute('app_glass', ['stock_id' => $application->getStock()->getId()]);
         }
 
@@ -204,6 +201,7 @@ class ApplicationController extends AbstractController
         ]);
     }
 
+    // DELETE: Удаление заявки
     #[Route('/application/delete/{id}', name: 'app_application_delete', methods: ['POST', 'DELETE'])]
     public function delete(int $id, Request $request, EntityManagerInterface $entityManager, ApplicationRepository $applicationRepository): Response
     {
@@ -229,34 +227,17 @@ class ApplicationController extends AbstractController
         $stock = $application->getStock();
 
         if ($action === 'buy') {
+            // Возвращаем замороженные средства
             $frozenCash = $quantity * $cost;
             $portfolio->revertCashDeduction($frozenCash);
         } else { // Action is 'sell'
-            // Возвращаем акции в Depositary
+            // Возвращаем замороженные акции
             $depositary = $entityManager->getRepository(Depositary::class)
                 ->findOneBy(['portfolio' => $portfolio, 'stock' => $stock]);
 
             if ($depositary) {
-                $depositary->setQuantity($depositary->getQuantity() + $quantity);
+                $depositary->setFrozen($depositary->getFrozen() - $quantity);
                 $entityManager->persist($depositary);
-            } else {
-                // Если Depositary не существует, создаем новый
-                $depositary = new Depositary();
-                $depositary->setPortfolio($portfolio);
-                $depositary->setStock($stock);
-                $depositary->setQuantity($quantity);
-                $entityManager->persist($depositary);
-            }
-
-            // Уменьшаем количество замороженных акций в PortfolioStock
-            $portfolioStock = $entityManager->getRepository(PortfolioStock::class)->findOneBy([
-                'portfolio' => $portfolio,
-                'stock' => $stock,
-            ]);
-
-            if ($portfolioStock) {
-                $portfolioStock->setFrozen($portfolioStock->getFrozen() - $quantity);
-                $entityManager->persist($portfolioStock);
             }
         }
 
