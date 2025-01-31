@@ -14,9 +14,19 @@ use Symfony\Component\Form\FormError;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Annotation\Route;
+use Symfony\Component\Security\Core\Exception\AccessDeniedException;
 
 class ApplicationController extends AbstractController
 {
+    private EntityManagerInterface $entityManager;
+    private DealService $dealService;
+
+    public function __construct(EntityManagerInterface $entityManager, DealService $dealService)
+    {
+        $this->entityManager = $entityManager;
+        $this->dealService = $dealService;
+    }
+
     // READ: Просмотр всех заявок по конкретной ценной бумаге (биржевой стакан)
     #[Route('/glass/{stock_id}', name: 'app_glass', methods: ['GET'])]
     public function glass(int $stock_id, ApplicationRepository $applicationRepository): Response
@@ -30,7 +40,7 @@ class ApplicationController extends AbstractController
 
     // CREATE: Создание новой заявки
     #[Route('/application/create', name: 'app_application_create', methods: ['GET', 'POST'])]
-    public function create(Request $request, EntityManagerInterface $entityManager, DealService $dealService): Response
+    public function create(Request $request): Response
     {
         $application = new Application();
         $form = $this->createForm(ApplicationType::class, $application, [
@@ -53,49 +63,54 @@ class ApplicationController extends AbstractController
             }
 
             if ($action === 'buy') {
+                // Логика для покупки
                 $requiredCash = $quantity * $cost;
                 $availableCash = $portfolio->getAvailableCash();
-
-                $this->addFlash('debug', 'Available cash: ' . $availableCash);
-                $this->addFlash('debug', 'Required cash: ' . $requiredCash);
 
                 if ($availableCash < $requiredCash) {
                     $form->get('quantity')->addError(new FormError('Not enough available cash.'));
                     return $this->render('application/create.html.twig', ['form' => $form->createView()]);
                 }
 
+                // Замораживаем средства
                 $portfolio->deductCash($requiredCash);
             } else { // Action is 'sell'
                 // Получаем Depositary для данного портфеля и акции
-                $depositary = $entityManager->getRepository(Depositary::class)
+                $depositary = $this->entityManager->getRepository(Depositary::class)
                     ->findOneBy(['portfolio' => $portfolio, 'stock' => $stock]);
 
-                if (!$depositary || $depositary->getQuantity() < $quantity) {
+                // Проверяем доступное количество акций (quantity - frozen)
+                if (!$depositary || $depositary->getAvailableQuantity() < $quantity) {
                     $form->get('quantity')->addError(new FormError('Not enough available stocks.'));
                     return $this->render('application/create.html.twig', ['form' => $form->createView()]);
                 }
 
-                $this->addFlash('debug', 'Available stocks: ' . $depositary->getQuantity());
-                $this->addFlash('debug', 'Required stocks: ' . $quantity);
+                // Замораживаем акции
+                $depositary->setFrozen($depositary->getFrozen() + $quantity);
 
-                // Обновляем количество акций в Depositary
+                // Уменьшаем количество акций в портфеле
                 $depositary->setQuantity($depositary->getQuantity() - $quantity);
-                $entityManager->persist($depositary);
+
+                $this->entityManager->persist($depositary);
             }
 
-            // Проверяем наличие подходящей заявки
-            $matchingApplication = $dealService->findMatchingApplication($application);
+            // Сохраняем заявку
+            $this->entityManager->persist($application);
+            $this->entityManager->flush();
+
+            // Проверяем наличие подходящей заявки и выполняем сделку
+            $matchingApplication = $this->dealService->findMatchingApplication($application);
             if ($matchingApplication) {
-                $dealService->executeTrade($application, $matchingApplication);
-                $this->addFlash('success', 'Trade executed successfully.');
-                return $this->redirectToRoute('app_glass', ['stock_id' => $stock->getId()]);
+                try {
+                    $this->dealService->executeTrade($application, $matchingApplication);
+                    $this->addFlash('success', 'Trade executed successfully.');
+                } catch (\Exception $e) {
+                    $this->addFlash('error', $e->getMessage());
+                }
+            } else {
+                $this->addFlash('info', 'No matching application found. Your application is pending.');
             }
 
-            // Persist the application
-            $entityManager->persist($application);
-            $entityManager->flush();
-
-            $this->addFlash('success', 'Application created successfully.');
             return $this->redirectToRoute('app_glass', ['stock_id' => $stock->getId()]);
         }
 
@@ -106,9 +121,9 @@ class ApplicationController extends AbstractController
 
     // UPDATE: Обновление заявки
     #[Route('/application/update/{id}', name: 'app_application_update', methods: ['GET', 'PUT', 'POST'])]
-    public function update(int $id, Request $request, EntityManagerInterface $entityManager, ApplicationRepository $applicationRepository, DealService $dealService): Response
+    public function update(int $id, Request $request): Response
     {
-        $application = $applicationRepository->find($id);
+        $application = $this->entityManager->getRepository(Application::class)->find($id);
         if (!$application) {
             throw $this->createNotFoundException('Application not found');
         }
@@ -116,7 +131,7 @@ class ApplicationController extends AbstractController
         $user = $this->getUser();
         $portfolio = $application->getPortfolio();
         if ($portfolio->getUser() !== $user) {
-            throw $this->createAccessDeniedException('You do not own this portfolio.');
+            throw new AccessDeniedException('You do not own this portfolio.');
         }
 
         $originalQuantity = $application->getQuantity();
@@ -145,11 +160,12 @@ class ApplicationController extends AbstractController
             $stock = $application->getStock();
 
             if ($originalAction === 'buy') {
+                // Логика для обновления покупки
                 $originalRequiredCash = $originalQuantity * $originalCost;
                 $newRequiredCash = $newQuantity * $newCost;
                 $difference = $newRequiredCash - $originalRequiredCash;
 
-                $availableCash = $portfolio->getAvailableCash() + $originalRequiredCash; // Revert original frozen cash
+                $availableCash = $portfolio->getAvailableCash() + $originalRequiredCash; // Возвращаем оригинальные замороженные средства
 
                 if ($difference > $availableCash) {
                     $form->get('quantity')->addError(new FormError('Not enough available cash.'));
@@ -158,11 +174,11 @@ class ApplicationController extends AbstractController
                     ]);
                 }
 
-                // Deduct the new required cash
+                // Замораживаем новые средства
                 $portfolio->deductCash($difference);
+                $this->entityManager->persist($application);
             } else { // Action is 'sell'
-                // Получаем Depositary для данного портфеля и акции
-                $depositary = $entityManager->getRepository(Depositary::class)
+                $depositary = $this->entityManager->getRepository(Depositary::class)
                     ->findOneBy(['portfolio' => $portfolio, 'stock' => $stock]);
 
                 if (!$depositary) {
@@ -172,46 +188,46 @@ class ApplicationController extends AbstractController
                     ]);
                 }
 
-                $originalFrozen = $originalQuantity;
-                $newFrozen = $newQuantity;
-                $difference = $newFrozen - $originalFrozen;
+                // Возвращаем оригинальные замороженные акции
+                $depositary->setFrozen($depositary->getFrozen() - $originalQuantity);
 
-                $availableStocks = $depositary->getQuantity() + $originalFrozen; // Revert original frozen stocks
+                // Увеличиваем количество акций в портфеле
+                $depositary->setQuantity($depositary->getQuantity() + $originalQuantity);
 
-                if ($difference > $availableStocks) {
+                // Проверяем доступное количество акций
+                $availableStocks = $depositary->getAvailableQuantity();
+
+                if ($newQuantity > $availableStocks) {
                     $form->get('quantity')->addError(new FormError('Not enough available stocks.'));
                     return $this->render('application/update.html.twig', [
                         'form' => $form->createView(),
                     ]);
                 }
 
-                // Обновляем количество акций в Depositary
-                $depositary->setQuantity($depositary->getQuantity() - $difference);
-                $entityManager->persist($depositary);
+                // Замораживаем новое количество акций
+                $depositary->setFrozen($depositary->getFrozen() + $newQuantity);
 
-                // Обновляем PortfolioStock
-                $portfolioStock = $entityManager->getRepository(PortfolioStock::class)->findOneBy([
-                    'portfolio' => $portfolio,
-                    'stock' => $stock,
-                ]);
+                // Уменьшаем количество акций в портфеле
+                $depositary->setQuantity($depositary->getQuantity() - $newQuantity);
 
-                if ($portfolioStock) {
-                    $portfolioStock->setFrozen($portfolioStock->getFrozen() + $difference);
-                    $entityManager->persist($portfolioStock);
-                }
+                $this->entityManager->persist($depositary);
             }
 
-            // Проверяем наличие подходящей заявки
-            $matchingApplication = $dealService->findMatchingApplication($application);
-            if ($matchingApplication) {
-                $dealService->executeTrade($application, $matchingApplication);
-                $this->addFlash('success', 'Trade executed successfully.');
-                return $this->redirectToRoute('app_glass', ['stock_id' => $application->getStock()->getId()]);
-            }
-
-            $entityManager->flush();
+            $this->entityManager->flush();
 
             $this->addFlash('success', 'Application updated successfully.');
+
+            $matchingApplication = $this->dealService->findMatchingApplication($application);
+            if ($matchingApplication) {
+                try {
+                    $this->dealService->executeTrade($application, $matchingApplication);
+                    $this->addFlash('success', 'Trade executed successfully.');
+                } catch (\Exception $e) {
+                    $this->addFlash('error', $e->getMessage());
+                }
+            } else {
+                $this->addFlash('info', 'No matching application found. Your application is pending.');
+            }
 
             return $this->redirectToRoute('app_glass', ['stock_id' => $application->getStock()->getId()]);
         }
@@ -221,10 +237,11 @@ class ApplicationController extends AbstractController
         ]);
     }
 
+    // DELETE: Удаление заявки
     #[Route('/application/delete/{id}', name: 'app_application_delete', methods: ['POST', 'DELETE'])]
-    public function delete(int $id, Request $request, EntityManagerInterface $entityManager, ApplicationRepository $applicationRepository): Response
+    public function delete(int $id, Request $request): Response
     {
-        $application = $applicationRepository->find($id);
+        $application = $this->entityManager->getRepository(Application::class)->find($id);
         if (!$application) {
             throw $this->createNotFoundException('Application not found.');
         }
@@ -232,12 +249,12 @@ class ApplicationController extends AbstractController
         $user = $this->getUser();
         $portfolio = $application->getPortfolio();
         if ($portfolio->getUser() !== $user) {
-            throw $this->createAccessDeniedException('You do not own this portfolio.');
+            throw new AccessDeniedException('You do not own this portfolio.');
         }
 
         $submittedToken = $request->request->get('_token');
         if (!$this->isCsrfTokenValid('delete' . $id, $submittedToken)) {
-            throw $this->createAccessDeniedException('Invalid CSRF token.');
+            throw new AccessDeniedException('Invalid CSRF token.');
         }
 
         $action = $application->getAction();
@@ -246,40 +263,23 @@ class ApplicationController extends AbstractController
         $stock = $application->getStock();
 
         if ($action === 'buy') {
+            // Возвращаем замороженные средства
             $frozenCash = $quantity * $cost;
             $portfolio->revertCashDeduction($frozenCash);
         } else { // Action is 'sell'
-            // Возвращаем акции в Depositary
-            $depositary = $entityManager->getRepository(Depositary::class)
+            // Возвращаем замороженные акции
+            $depositary = $this->entityManager->getRepository(Depositary::class)
                 ->findOneBy(['portfolio' => $portfolio, 'stock' => $stock]);
 
             if ($depositary) {
-                $depositary->setQuantity($depositary->getQuantity() + $quantity);
-                $entityManager->persist($depositary);
-            } else {
-                // Если Depositary не существует, создаем новый
-                $depositary = new Depositary();
-                $depositary->setPortfolio($portfolio);
-                $depositary->setStock($stock);
-                $depositary->setQuantity($quantity);
-                $entityManager->persist($depositary);
-            }
-
-            // Уменьшаем количество замороженных акций в PortfolioStock
-            $portfolioStock = $entityManager->getRepository(PortfolioStock::class)->findOneBy([
-                'portfolio' => $portfolio,
-                'stock' => $stock,
-            ]);
-
-            if ($portfolioStock) {
-                $portfolioStock->setFrozen($portfolioStock->getFrozen() - $quantity);
-                $entityManager->persist($portfolioStock);
+                $depositary->setFrozen($depositary->getFrozen() - $quantity);
+                $this->entityManager->persist($depositary);
             }
         }
 
         // Удаляем заявку
-        $entityManager->remove($application);
-        $entityManager->flush();
+        $this->entityManager->remove($application);
+        $this->entityManager->flush();
 
         $this->addFlash('success', 'Application deleted successfully.');
         return $this->redirectToRoute('app_glass', ['stock_id' => $stock->getId()]);

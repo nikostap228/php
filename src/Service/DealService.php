@@ -54,88 +54,87 @@ class DealService
      */
     public function executeTrade(Application $application, Application $matchingApplication): void
     {
-        $portfolio1 = $application->getPortfolio();
-        $portfolio2 = $matchingApplication->getPortfolio();
+        $portfolioBuyer = $application->getAction() === 'buy' ? $application->getPortfolio() : $matchingApplication->getPortfolio();
+        $portfolioSeller = $application->getAction() === 'sell' ? $application->getPortfolio() : $matchingApplication->getPortfolio();
         $stock = $application->getStock();
-        $quantity1 = $application->getQuantity();
-        $quantity2 = $matchingApplication->getQuantity();
-        $price1 = $application->getCost();
-        $price2 = $matchingApplication->getCost();
-
-        // Определяем количество для обмена (минимальное из двух количеств)
-        $exchangeQuantity = min($quantity1, $quantity2);
-
-        // Определяем цену (средняя цена)
-        $averagePrice = ($price1 + $price2) / 2;
+        $quantity = min($application->getQuantity(), $matchingApplication->getQuantity());
+        $price = ($application->getCost() + $matchingApplication->getCost()) / 2;
 
         // Находим Depositary для покупателя и продавца
-        $depositary1 = $this->entityManager->getRepository(Depositary::class)->findOneBy([
-            'portfolio' => $portfolio1,
+        $depositaryBuyer = $this->entityManager->getRepository(Depositary::class)->findOneBy([
+            'portfolio' => $portfolioBuyer,
             'stock' => $stock,
         ]);
-        $depositary2 = $this->entityManager->getRepository(Depositary::class)->findOneBy([
-            'portfolio' => $portfolio2,
+        $depositarySeller = $this->entityManager->getRepository(Depositary::class)->findOneBy([
+            'portfolio' => $portfolioSeller,
             'stock' => $stock,
         ]);
 
-        if ($application->getAction() === 'buy') {
-            // Проверяем, достаточно ли средств у покупателя
-            if ($portfolio1->getAvailableCash() < ($exchangeQuantity * $averagePrice)) {
-                throw new \Exception('Not enough cash for the purchase.');
-            }
-
-            // Проверяем, достаточно ли акций у продавца
-            if (!$depositary2 || $depositary2->getQuantity() < $exchangeQuantity) {
-                throw new \Exception('Seller does not have enough stocks to sell.');
-            }
-
-            // Уменьшаем баланс покупателя
-            $portfolio1->deductCash($exchangeQuantity * $averagePrice);
-            // Увеличиваем количество акций у покупателя
-            if (!$depositary1) {
-                $depositary1 = new Depositary();
-                $depositary1->setPortfolio($portfolio1);
-                $depositary1->setStock($stock);
-                $depositary1->setQuantity(0);
-            }
-            $depositary1->setQuantity($depositary1->getQuantity() + $exchangeQuantity);
-            $this->entityManager->persist($depositary1);
-
-            // Увеличиваем баланс продавца
-            $portfolio2->addCash($exchangeQuantity * $averagePrice);
-            // Уменьшаем количество акций у продавца
-            if ($depositary2) {
-                $depositary2->setQuantity($depositary2->getQuantity() - $exchangeQuantity);
-                $this->entityManager->persist($depositary2);
-            }
-        } else {
-            // Проверяем, достаточно ли акций у продавца
-            if (!$depositary1 || $depositary1->getQuantity() < $exchangeQuantity) {
-                throw new \Exception('Buyer does not have enough stocks to sell.');
-            }
-
-            // Уменьшаем баланс продавца
-            $portfolio1->deductCash($exchangeQuantity * $averagePrice);
-            // Уменьшаем количество акций у продавца
-            $depositary1->setQuantity($depositary1->getQuantity() - $exchangeQuantity);
-            $this->entityManager->persist($depositary1);
-
-            // Увеличиваем баланс покупателя
-            $portfolio2->addCash($exchangeQuantity * $averagePrice);
-            // Увеличиваем количество акций у покупателя
-            if (!$depositary2) {
-                $depositary2 = new Depositary();
-                $depositary2->setPortfolio($portfolio2);
-                $depositary2->setStock($stock);
-                $depositary2->setQuantity(0);
-            }
-            $depositary2->setQuantity($depositary2->getQuantity() + $exchangeQuantity);
-            $this->entityManager->persist($depositary2);
+        // Проверяем, достаточно ли замороженных акций у продавца
+        if (!$depositarySeller || $depositarySeller->getFrozen() < $quantity) {
+            throw new \Exception('Seller does not have enough frozen stocks to sell.');
         }
+
+        // Проверяем, достаточно ли замороженных средств у покупателя
+        $requiredFrozenCash = $quantity * $price;
+        if ($portfolioBuyer->getFrozenCash() < $requiredFrozenCash) {
+            throw new \Exception('Buyer does not have enough frozen cash for the purchase.');
+        }
+
+        // Перемещаем акции из замороженных активов продавца в портфель покупателя
+        if (!$depositaryBuyer) {
+            $depositaryBuyer = new Depositary();
+            $depositaryBuyer->setPortfolio($portfolioBuyer);
+            $depositaryBuyer->setStock($stock);
+            $depositaryBuyer->setQuantity(0);
+            $depositaryBuyer->setFrozen(0);
+        }
+        $depositaryBuyer->setQuantity($depositaryBuyer->getQuantity() + $quantity);
+
+        // Уменьшаем замороженные акции у продавца
+        $depositarySeller->setFrozen($depositarySeller->getFrozen() - $quantity);
+
+        // Перемещаем замороженные средства покупателя в баланс продавца
+        $portfolioBuyer->setFrozenCash($portfolioBuyer->getFrozenCash() - $requiredFrozenCash);
+        $portfolioSeller->addCash($requiredFrozenCash);
+
+        // Обновляем PortfolioStock для покупателя
+        $portfolioStockBuyer = $this->entityManager->getRepository(PortfolioStock::class)->findOneBy([
+            'portfolio' => $portfolioBuyer,
+            'stock' => $stock,
+        ]);
+        if (!$portfolioStockBuyer) {
+            $portfolioStockBuyer = new PortfolioStock();
+            $portfolioStockBuyer->setPortfolio($portfolioBuyer);
+            $portfolioStockBuyer->setStock($stock);
+            $portfolioStockBuyer->setQuantity(0);
+            $portfolioStockBuyer->setFrozen(0);
+        }
+        $portfolioStockBuyer->setQuantity($portfolioStockBuyer->getQuantity() + $quantity);
+
+        // Обновляем PortfolioStock для продавца
+        $portfolioStockSeller = $this->entityManager->getRepository(PortfolioStock::class)->findOneBy([
+            'portfolio' => $portfolioSeller,
+            'stock' => $stock,
+        ]);
+        if ($portfolioStockSeller) {
+            $portfolioStockSeller->setQuantity($portfolioStockSeller->getQuantity() - $quantity);
+        }
+
+        // Сохраняем изменения
+        $this->entityManager->persist($depositaryBuyer);
+        $this->entityManager->persist($depositarySeller);
+        $this->entityManager->persist($portfolioStockBuyer);
+        if ($portfolioStockSeller) {
+            $this->entityManager->persist($portfolioStockSeller);
+        }
+        $this->entityManager->persist($portfolioBuyer);
+        $this->entityManager->persist($portfolioSeller);
 
         // Удаляем заявки
         $this->entityManager->remove($application);
         $this->entityManager->remove($matchingApplication);
+
         $this->entityManager->flush();
     }
 }
